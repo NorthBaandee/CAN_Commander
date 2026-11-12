@@ -6,6 +6,9 @@
 #include <string.h>
 
 #include "tools/ToolUtils.h"
+#if defined(ARDUINO_ARCH_ESP32)
+#include "ui/WebDashboard.h"
+#endif
 
 #if defined(ARDUINO_ARCH_ESP32)
 #include <errno.h>
@@ -94,6 +97,13 @@ App::App()
     : flipper_uart_(1),
 #if defined(ARDUINO_ARCH_ESP32)
       wifi_cli_server_(BoardConfig::WIFI_CLI_PORT),
+      web_server_(80),
+      web_routes_registered_(false),
+      web_command_active_(false),
+      web_request_queue_(nullptr),
+      web_response_queue_(nullptr),
+      web_task_handle_(nullptr),
+      web_next_request_id_(0),
       wifi_ap_ready_(false),
       wifi_autostart_(BoardConfig::WIFI_AP_AUTOSTART != 0),
 #endif
@@ -111,6 +121,14 @@ App::App()
   wifi_pending_off_ = 0;
   wifi_last_progress_ms_ = 0;
   wifi_dropped_ = 0;
+  web_response_[0] = '\0';
+  web_response_len_ = 0;
+  web_capture_active_ = false;
+  web_response_overflow_ = false;
+  web_event_log_[0] = '\0';
+  web_event_log_len_ = 0;
+  wifi_restart_pending_ = false;
+  wifi_restart_due_ms_ = 0;
 #endif
 }
 
@@ -343,10 +361,14 @@ bool App::startWifiAp() {
 
   wifi_cli_server_.begin();
   wifi_cli_server_.setNoDelay(true);
+  if (!beginWebServer()) {
+    sendCliLine("WiFi dashboard task unavailable; TCP CLI remains on port %u",
+                (unsigned)BoardConfig::WIFI_CLI_PORT);
+  }
   wifi_ap_ready_ = true;
 
   const IPAddress ip = WiFi.softAPIP();
-  sendCliLine("WiFi AP ready ssid=%s ip=%u.%u.%u.%u cli_port=%u",
+  sendCliLine("WiFi AP ready ssid=%s ip=%u.%u.%u.%u web_port=80 cli_port=%u",
               wifi_ssid_,
               (unsigned)ip[0],
               (unsigned)ip[1],
@@ -364,6 +386,274 @@ void App::stopWifiAp() {
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
   wifi_ap_ready_ = false;
+}
+
+bool App::beginWebServer() {
+  if (!web_routes_registered_) {
+    static const char *headers[] = {"Origin"};
+    web_server_.collectHeaders(headers, 1);
+    web_server_.on("/", HTTP_GET, [this]() {
+      web_server_.sendHeader("Cache-Control", "no-store");
+      web_server_.send_P(200, "text/html; charset=utf-8", ui::kWebDashboardHtml);
+    });
+    web_server_.on("/api/status", HTTP_GET, [this]() { handleWebStatus(); });
+    web_server_.on("/api/events", HTTP_GET, [this]() { handleWebEvents(); });
+    web_server_.on("/api/command", HTTP_POST, [this]() { handleWebCommand(); });
+    web_server_.onNotFound([this]() {
+      web_server_.send(404, "text/plain; charset=utf-8", "Not found");
+    });
+    web_routes_registered_ = true;
+  }
+  if (web_task_handle_ != nullptr) {
+    return true;
+  }
+
+  web_request_queue_ = xQueueCreate(1, sizeof(WebRequest));
+  web_response_queue_ = xQueueCreate(1, sizeof(WebResponse));
+  if (web_request_queue_ == nullptr || web_response_queue_ == nullptr) {
+    if (web_request_queue_ != nullptr) {
+      vQueueDelete(web_request_queue_);
+      web_request_queue_ = nullptr;
+    }
+    if (web_response_queue_ != nullptr) {
+      vQueueDelete(web_response_queue_);
+      web_response_queue_ = nullptr;
+    }
+    sendCliLine("WiFi dashboard queue allocation failed");
+    return false;
+  }
+
+  web_server_.begin();
+  const BaseType_t created = xTaskCreatePinnedToCore(
+      &App::webServerTaskThunk,
+      "cc_web",
+      8192,
+      this,
+      1,
+      &web_task_handle_,
+      0);
+  if (created != pdPASS) {
+    web_task_handle_ = nullptr;
+    vQueueDelete(web_request_queue_);
+    vQueueDelete(web_response_queue_);
+    web_request_queue_ = nullptr;
+    web_response_queue_ = nullptr;
+    web_server_.stop();
+    sendCliLine("WiFi dashboard task creation failed");
+    return false;
+  }
+  return true;
+}
+
+void App::webServerTaskThunk(void *context) {
+  static_cast<App *>(context)->webServerTask();
+}
+
+void App::webServerTask() {
+  for (;;) {
+    web_server_.handleClient();
+    vTaskDelay(1);
+  }
+}
+
+bool App::isSameOriginWebRequest() {
+  if (!web_server_.hasHeader("Origin")) {
+    return false;
+  }
+  const String expected = String("http://") + WiFi.softAPIP().toString();
+  return web_server_.header("Origin") == expected;
+}
+
+void App::dispatchWebRequest(const char *command, bool status_request, bool events_request) {
+  if (web_request_queue_ == nullptr || web_response_queue_ == nullptr) {
+    web_server_.send(503, "text/plain; charset=utf-8", "Dashboard request queue unavailable");
+    return;
+  }
+
+  WebRequest request{};
+  request.request_id = ++web_next_request_id_;
+  request.status_request = status_request;
+  request.events_request = events_request;
+  if (command != nullptr) {
+    const size_t len = strnlen(command, sizeof(request.command));
+    if (len >= sizeof(request.command)) {
+      web_server_.send(400, "text/plain; charset=utf-8", "Invalid command length");
+      return;
+    }
+    memcpy(request.command, command, len + 1);
+  }
+  if (xQueueSend(web_request_queue_, &request, 0) != pdTRUE) {
+    web_server_.send(503, "text/plain; charset=utf-8", "Device is busy; retry shortly");
+    return;
+  }
+
+  WebResponse response{};
+  const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+  while (response.request_id != request.request_id) {
+    const TickType_t now = xTaskGetTickCount();
+    if ((int32_t)(deadline - now) <= 0 ||
+        xQueueReceive(web_response_queue_, &response, deadline - now) != pdTRUE) {
+      web_server_.send(504, "text/plain; charset=utf-8", "Device did not complete request in time");
+      return;
+    }
+  }
+  web_server_.sendHeader("Cache-Control", "no-store");
+  web_server_.send(response.status_code, "text/plain; charset=utf-8", response.body);
+}
+
+void App::serviceWebRequests() {
+  if (web_request_queue_ == nullptr || web_response_queue_ == nullptr) {
+    return;
+  }
+  WebRequest request{};
+  if (xQueueReceive(web_request_queue_, &request, 0) != pdTRUE) {
+    return;
+  }
+
+  web_response_len_ = 0;
+  web_response_overflow_ = false;
+  web_response_[0] = '\0';
+  web_capture_active_ = true;
+
+  uint16_t status_code = 200;
+  if (request.events_request) {
+    strncpy(web_response_, web_event_log_, sizeof(web_response_) - 1);
+    web_response_len_ = (uint16_t)strnlen(web_response_, sizeof(web_response_));
+  } else if (request.status_request) {
+    const char *owner = "none";
+    if (owner_ == core::InterfaceOwner::CLI) {
+      owner = "cli";
+    } else if (owner_ == core::InterfaceOwner::FLIPPER) {
+      owner = "flipper";
+    }
+
+    sendCliLine("owner=%s active_tool=%s dbc_signals=%u",
+                owner, tools_.activeName(), (unsigned)dbc_store_.count());
+    const core::BusConfig c0 = can_.getBusConfig(core::BusId::CAN0);
+    const core::BusConfig c1 = can_.getBusConfig(core::BusId::CAN1);
+    const core::BusFilter f0 = can_.getFilter(core::BusId::CAN0);
+    const core::BusFilter f1 = can_.getFilter(core::BusId::CAN1);
+    sendCliLine("can0 bitrate=%lu mode=%s filter=%u mask=0x%lX value=0x%lX",
+                (unsigned long)c0.bitrate, c0.listen_only ? "listen" : "normal",
+                f0.enabled ? 1U : 0U, (unsigned long)f0.mask, (unsigned long)f0.filter);
+    sendCliLine("can1 bitrate=%lu mode=%s filter=%u mask=0x%lX value=0x%lX",
+                (unsigned long)c1.bitrate, c1.listen_only ? "listen" : "normal",
+                f1.enabled ? 1U : 0U, (unsigned long)f1.mask, (unsigned long)f1.filter);
+    sendCliLine("can1 backend=%s state=%s", can_.can1BackendName(),
+                can_.isBusAvailable(core::BusId::CAN1) ? "ready" : "disabled");
+    sendCliLine("wifi ap=%s autostart=%u ssid=%s clients=%u cli_port=%u",
+                wifi_ap_ready_ ? "up" : "down", wifi_autostart_ ? 1U : 0U,
+                wifi_ssid_, (unsigned)WiFi.softAPgetStationNum(),
+                (unsigned)BoardConfig::WIFI_CLI_PORT);
+    char description[160];
+    tools_.describeActive(description, sizeof(description));
+    sendCliLine("%s", description);
+    sendCliLine("wifi_password_default=%u",
+                strcmp(wifi_password_, BoardConfig::WIFI_AP_PASSWORD) == 0 ? 1U : 0U);
+  } else {
+    cmd::Request req;
+    if (!router_.parseCli(request.command, req) || !isWebCommandAllowed(req)) {
+      sendCliLine("ERR: command is not available in the dashboard");
+      status_code = 403;
+    } else {
+      web_command_active_ = true;
+      handleRequest(req);
+      web_command_active_ = false;
+      if (strncmp(web_response_, "ERR:", 4) == 0 ||
+          strncmp(web_response_, "LOCKED:", 7) == 0 ||
+          strstr(web_response_, "\nERR:") != nullptr ||
+          strstr(web_response_, "\nLOCKED:") != nullptr) {
+        status_code = 400;
+      }
+    }
+  }
+
+  web_capture_active_ = false;
+  WebResponse response{};
+  response.request_id = request.request_id;
+  response.status_code = web_response_overflow_ ? 500 : status_code;
+  if (web_response_overflow_) {
+    strncpy(response.body, "Dashboard response overflow", sizeof(response.body) - 1);
+  } else if (web_response_len_ == 0) {
+    strncpy(response.body, "OK", sizeof(response.body) - 1);
+  } else {
+    strncpy(response.body, web_response_, sizeof(response.body) - 1);
+  }
+  if (xQueueSend(web_response_queue_, &response, 0) != pdTRUE) {
+    sendCliLine("WiFi dashboard response queue unavailable");
+  }
+}
+
+bool App::isWebCommandAllowed(const cmd::Request &req) const {
+  switch (req.type) {
+    case cmd::RequestType::STATUS:
+    case cmd::RequestType::BUS_SET:
+    case cmd::RequestType::BUS_SHOW:
+    case cmd::RequestType::BUS_SET_FILTER:
+    case cmd::RequestType::BUS_CLEAR_FILTER:
+    case cmd::RequestType::TOOL_START:
+    case cmd::RequestType::TOOL_STOP:
+    case cmd::RequestType::TOOL_STATUS:
+    case cmd::RequestType::TOOL_CONFIG:
+    case cmd::RequestType::DBC_CLEAR:
+    case cmd::RequestType::DBC_ADD:
+    case cmd::RequestType::DBC_REMOVE:
+    case cmd::RequestType::DBC_LIST:
+    case cmd::RequestType::LED_SET:
+      return true;
+    case cmd::RequestType::WIFI_CONFIG:
+      return (core::parse::hasKey(req.args, "pass") != core::parse::hasKey(req.args, "password")) &&
+             !core::parse::hasKey(req.args, "ssid") &&
+             !core::parse::hasKey(req.args, "autostart") &&
+             !core::parse::hasKey(req.args, "ap");
+    default:
+      return false;
+  }
+}
+
+void App::handleWebStatus() {
+  dispatchWebRequest(nullptr, true);
+}
+
+void App::handleWebEvents() {
+  dispatchWebRequest(nullptr, false, true);
+}
+
+void App::handleWebCommand() {
+  if (!isSameOriginWebRequest()) {
+    web_server_.send(403, "text/plain; charset=utf-8", "Same-origin request required");
+    return;
+  }
+  if (!web_server_.hasArg("cmd")) {
+    web_server_.send(400, "text/plain; charset=utf-8", "Missing cmd");
+    return;
+  }
+
+  const String command = web_server_.arg("cmd");
+  if (command.isEmpty() || command.length() >= BoardConfig::CLI_LINE_MAX) {
+    web_server_.send(400, "text/plain; charset=utf-8", "Invalid command length");
+    return;
+  }
+  char line[BoardConfig::CLI_LINE_MAX];
+  for (size_t i = 0; i < command.length(); ++i) {
+    const unsigned char c = (unsigned char)command[i];
+    if (c < 0x20 || c > 0x7E) {
+      web_server_.send(400, "text/plain; charset=utf-8", "Command must be one printable ASCII line");
+      return;
+    }
+    line[i] = (char)c;
+  }
+  line[command.length()] = '\0';
+
+  dispatchWebRequest(line, false);
+}
+
+void App::serviceWifiRestart() {
+  if (!wifi_restart_pending_ || (int32_t)(millis() - wifi_restart_due_ms_) < 0) {
+    return;
+  }
+  wifi_restart_pending_ = false;
+  ESP.restart();
 }
 
 void App::loadWifiSettings() {
@@ -524,6 +814,8 @@ void App::pollInputs() {
 
 #if defined(ARDUINO_ARCH_ESP32)
   pollWifiCli();
+  serviceWebRequests();
+  serviceWifiRestart();
 #endif
 
   core::FlipperPacket packet;
@@ -767,6 +1059,40 @@ void App::pushCliLineRaw(const char *line) {
   core::CliOut out{};
   strncpy(out.line, line, sizeof(out.line) - 1);
   out.line[sizeof(out.line) - 1] = '\0';
+
+  if (wifi_ap_ready_) {
+    const size_t len = strnlen(out.line, sizeof(out.line));
+    const size_t needed = len + 1;
+    while ((size_t)web_event_log_len_ + needed >= sizeof(web_event_log_)) {
+      char *newline = strchr(web_event_log_, '\n');
+      if (newline == nullptr) {
+        web_event_log_len_ = 0;
+        web_event_log_[0] = '\0';
+        break;
+      }
+      const size_t remove = (size_t)(newline - web_event_log_) + 1;
+      memmove(web_event_log_, web_event_log_ + remove, web_event_log_len_ - remove);
+      web_event_log_len_ = (uint16_t)(web_event_log_len_ - remove);
+      web_event_log_[web_event_log_len_] = '\0';
+    }
+    memcpy(web_event_log_ + web_event_log_len_, out.line, len);
+    web_event_log_len_ = (uint16_t)(web_event_log_len_ + len);
+    web_event_log_[web_event_log_len_++] = '\n';
+    web_event_log_[web_event_log_len_] = '\0';
+  }
+
+  if (web_capture_active_ && !web_response_overflow_) {
+    const size_t len = strnlen(out.line, sizeof(out.line));
+    const size_t remaining = sizeof(web_response_) - 1 - web_response_len_;
+    if (len + 1 > remaining) {
+      web_response_overflow_ = true;
+    } else {
+      memcpy(web_response_ + web_response_len_, out.line, len);
+      web_response_len_ = (uint16_t)(web_response_len_ + len);
+      web_response_[web_response_len_++] = '\n';
+      web_response_[web_response_len_] = '\0';
+    }
+  }
 
   bool dropped = false;
   cli_tx_.pushDropOldest(out, &dropped);
@@ -1830,9 +2156,14 @@ core::StatusCode App::cmdWifiConfig(const cmd::Request &req) {
       }
     }
   } else if (wifi_ap_ready_ && creds_changed) {
-    stopWifiAp();
-    if (!startWifiAp()) {
-      return core::StatusCode::BUS_ERR;
+    if (web_command_active_) {
+      wifi_restart_pending_ = true;
+      wifi_restart_due_ms_ = millis() + 1500;
+    } else {
+      stopWifiAp();
+      if (!startWifiAp()) {
+        return core::StatusCode::BUS_ERR;
+      }
     }
   }
 

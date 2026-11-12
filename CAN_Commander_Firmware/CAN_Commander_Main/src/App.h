@@ -5,6 +5,10 @@
 #if defined(ARDUINO_ARCH_ESP32)
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WebServer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 #endif
 
 #include "BoardConfig.h"
@@ -43,6 +47,21 @@ class App : public tools::ToolHost {
     core::FlipperPacket packet;
   };
 
+#if defined(ARDUINO_ARCH_ESP32)
+  struct WebRequest {
+    char command[BoardConfig::CLI_LINE_MAX];
+    uint32_t request_id;
+    bool status_request;
+    bool events_request;
+  };
+
+  struct WebResponse {
+    uint32_t request_id;
+    uint16_t status_code;
+    char body[2048];
+  };
+#endif
+
   void pollInputs();
   void processCan();
   void processTools();
@@ -58,6 +77,17 @@ class App : public tools::ToolHost {
   void loadWifiSettings();
   bool saveWifiSettings() const;
   void pollWifiCli();
+  bool beginWebServer();
+  void handleWebStatus();
+  void handleWebEvents();
+  void handleWebCommand();
+  void webServerTask();
+  static void webServerTaskThunk(void *context);
+  void serviceWebRequests();
+  void dispatchWebRequest(const char *command, bool status_request, bool events_request = false);
+  bool isSameOriginWebRequest();
+  bool isWebCommandAllowed(const cmd::Request &req) const;
+  void serviceWifiRestart();
   void queueWifiLine(const char *line, size_t len, uint32_t now);
   void serviceWifiPending(uint32_t now);
 #endif
@@ -122,7 +152,14 @@ class App : public tools::ToolHost {
 #if defined(ARDUINO_ARCH_ESP32)
   io::CliShell wifi_cli_;
   WiFiServer wifi_cli_server_;
+  WebServer web_server_;
   WiFiClient wifi_cli_client_;
+  bool web_routes_registered_;
+  bool web_command_active_;
+  QueueHandle_t web_request_queue_;
+  QueueHandle_t web_response_queue_;
+  TaskHandle_t web_task_handle_;
+  uint32_t web_next_request_id_;
   bool wifi_ap_ready_;
   bool wifi_autostart_;
   char wifi_ssid_[33];
@@ -154,6 +191,14 @@ class App : public tools::ToolHost {
   uint16_t wifi_pending_off_;
   uint32_t wifi_last_progress_ms_;
   uint32_t wifi_dropped_;
+  char web_response_[2048];
+  uint16_t web_response_len_;
+  bool web_capture_active_;
+  bool web_response_overflow_;
+  char web_event_log_[2048];
+  uint16_t web_event_log_len_;
+  bool wifi_restart_pending_;
+  uint32_t wifi_restart_due_ms_;
 #endif
 
   core::SinkCounters cli_counters_;

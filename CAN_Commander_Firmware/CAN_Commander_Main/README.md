@@ -4,7 +4,7 @@
 
 CAN Commander is an ESP32 firmware for dual-bus CAN exploration. It runs on the official CAN Commander board (ESP32-S3) and on your own hardware (ESP32-S3 or classic ESP32 with a CAN transceiver, plus an optional MCP2515 or MCP2517FD/MCP2518FD second controller). It provides:
 - USB CDC CLI (`Serial`) for developer control
-- Optional Wi-Fi AP CLI (`WiFiServer`, TCP) for remote control
+- Wi-Fi AP dashboard (`WebServer`, HTTP) and optional TCP CLI for remote control
 - Flipper UART control/data protocol (`Serial1`)
 - Modular tool system (one active tool at a time) with 12 tools: traffic capture, filtered read, periodic write, speed, value/bit tracking, unique-ID discovery, reverse-engineering, OBD-II PID/VIN/DTC, DBC decode, custom injection, and record/replay
 - DBC signal descriptor loading + live decode
@@ -44,7 +44,7 @@ Other defaults:
   - An unsupported bitrate is rejected before the bus is touched; the current configuration stays active.
 - USB CLI: 115200 baud (USB CDC on ESP32-S3, UART0 on classic ESP32).
 - Flipper UART: 921600 baud, 8N1.
-- Wi-Fi AP CLI: compiled in (`BOARDCFG_WIFI_AP_ENABLED=1`) but **not started** by default (`BOARDCFG_WIFI_AP_AUTOSTART=0`). SSID `CAN_Commander`, password `cancommander`, TCP port `7777`. Anyone who joins the AP gets full CLI control, including CAN transmit, so change the password (`wifi set pass=...`) before enabling it.
+- Wi-Fi AP and dashboard: compiled in (`BOARDCFG_WIFI_AP_ENABLED=1`) and started by default (`BOARDCFG_WIFI_AP_AUTOSTART=1`). SSID `CanCommander`, password `cancommander`, dashboard at `http://192.168.4.1/`, TCP CLI port `7777`. The dashboard reminds users to change the default password; dismissing the reminder does not change it. Anyone with the AP password can control tools and CAN transmission, so use a unique password (`wifi set pass=...`).
 - DBC signal capacity: `128`. Output queue depth per sink (CLI/Flipper): `256`.
 
 ### Building
@@ -199,34 +199,34 @@ led set brightness=5
 - `led show`
 - `led set brightness=<1-10>`
 
-## Wi-Fi AP CLI (Optional)
+## Wi-Fi AP Dashboard and CLI
 
-The AP and TCP CLI are compiled in by default (`BOARDCFG_WIFI_AP_ENABLED=1`) but do **not start** until you ask (`BOARDCFG_WIFI_AP_AUTOSTART=0`). Start it once with `wifi start`, or persist it with `wifi set autostart=1`. Build-time defaults:
+The AP, HTTP dashboard, and TCP CLI are compiled in by default (`BOARDCFG_WIFI_AP_ENABLED=1`) and the AP auto-starts (`BOARDCFG_WIFI_AP_AUTOSTART=1`). The dashboard is served at `http://192.168.4.1/`; it shows bus/tool status and live CLI/tool output, and provides bus and tool controls. The TCP CLI remains on port `7777`. The dashboard offers a dismissible reminder while the default password is active. Build-time defaults:
 
 ```cpp
 #define BOARDCFG_WIFI_AP_ENABLED 1        // 0 compiles Wi-Fi out entirely
-#define BOARDCFG_WIFI_AP_SSID "CAN_Commander"
+#define BOARDCFG_WIFI_AP_SSID "CanCommander"
 #define BOARDCFG_WIFI_AP_PASSWORD "cancommander"
 #define BOARDCFG_WIFI_CLI_PORT 7777
-#define BOARDCFG_WIFI_AP_AUTOSTART 0
+#define BOARDCFG_WIFI_AP_AUTOSTART 1
 ```
 
-Security: the Wi-Fi CLI has the same authority as USB, including CAN transmit, and the default password is public. Set your own password (`wifi set pass=<8-63 chars>`) before enabling the AP. Settings are stored in NVS.
+Security: the Wi-Fi dashboard and CLI can control tools that transmit CAN messages. The default password is public; change it to a unique 8–63-character password using the dashboard or `wifi set pass=<password>`. The dashboard reminder is advisory, not a lockout. Settings are stored in NVS.
 
-Boot log prints AP IP and CLI port once started:
+Boot log prints AP IP, dashboard URL, and CLI port once started:
 
 ```text
-WiFi AP ready ssid=<ssid> ip=<ap_ip> cli_port=<port>
+WiFi AP ready ssid=<ssid> ip=<ap_ip> web_port=80 cli_port=<port>
 ```
 
-Connect a phone/laptop to the AP, then open a raw TCP client (for example `nc <ap_ip> 7777`) to `<ap_ip>:<port>`.
+Connect a phone/laptop to the AP and open `http://<ap_ip>/` for the dashboard. The raw TCP CLI is also available (for example `nc <ap_ip> 7777`).
 Commands are the same CLI commands as USB, including injection shortcuts once `custom_inject` is active.
 One client at a time. A client that stops reading for 5 seconds is disconnected so it cannot stall the firmware; lines it could not accept in time are skipped (counted in `stats`).
 
 Runtime config/persistence:
 - `wifi set` / `wifi config` updates SSID/password/autostart and stores to NVS.
 - `wifi start` / `wifi stop` controls AP immediately.
-- `autostart=1` means AP comes up on next power cycle; `autostart=0` keeps AP off until started.
+- `autostart=1` means AP comes up on next power cycle; `autostart=0` keeps AP off until started. The default on a fresh install is `1`.
 
 Example trigger flow (profile already loaded):
 

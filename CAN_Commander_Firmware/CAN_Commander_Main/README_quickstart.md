@@ -1,6 +1,6 @@
 # CAN Commander v2 Quickstart
 
-This is the fast path to get CAN Commander v2 running over USB CLI, optional Wi-Fi AP CLI, and Flipper UART.
+This is the fast path to get CAN Commander v2 running over USB CLI, the Wi-Fi dashboard, and Flipper UART.
 
 For full details, see `README.md`.
 
@@ -52,8 +52,8 @@ BOARDCFG_NEOPIXEL_ENABLED   0 | 1
 BOARDCFG_CAN0_TX_PIN / BOARDCFG_CAN0_RX_PIN
 BOARDCFG_SPI_CS_PIN / _MOSI_PIN / _SCK_PIN / _MISO_PIN
 BOARDCFG_FLIPPER_UART_TX_PIN / BOARDCFG_FLIPPER_UART_RX_PIN
-BOARDCFG_WIFI_AP_ENABLED    0 | 1 (default 1: compiled in, not started)
-BOARDCFG_WIFI_AP_AUTOSTART  0 | 1 (default 0)
+BOARDCFG_WIFI_AP_ENABLED    0 | 1 (default 1: compiled in)
+BOARDCFG_WIFI_AP_AUTOSTART  0 | 1 (default 1: starts on boot)
 ```
 
 Common setups:
@@ -170,23 +170,26 @@ inject list
 inject cancel
 ```
 
-## 6.1) Optional Wi-Fi AP CLI
-The AP is compiled in but off by default. The default password `cancommander` is public, so set your own first:
+## Wi-Fi Dashboard
+
+The AP starts automatically by default. Connect to Wi-Fi `CanCommander` with password `cancommander`, then open `http://192.168.4.1/`. The dashboard shows bus/tool status and live output, with controls for bus configuration and the existing tools. Change the public default AP password in the dashboard or with `wifi set pass=<your-password>`; the on-page reminder can be dismissed, but the password remains unchanged until you set a new one. Use transmitting tools only while parked or on a bench.
+
+## 6.1) Wi-Fi AP CLI
+The TCP CLI remains available on port `7777` after the AP starts. The default password `cancommander` is public; set a unique password with:
 
 ```text
 wifi set pass=<your-8-to-63-char-password>
-wifi start
 ```
 
 1. On start, note:
 ```text
-WiFi AP ready ssid=<ssid> ip=<ap_ip> cli_port=<port>
+WiFi AP ready ssid=<ssid> ip=<ap_ip> web_port=80 cli_port=<port>
 ```
 2. Join the AP from your phone/laptop.
 3. Open a TCP client to `<ap_ip>:<port>` (for example: `nc <ap_ip> 7777`).
 4. Use the same CLI commands as USB.
 
-To start the AP on every boot: `wifi set autostart=1`.
+To disable AP autostart: `wifi set autostart=0`. Re-enable it with `wifi set autostart=1`.
 
 Runtime Wi-Fi commands:
 ```text

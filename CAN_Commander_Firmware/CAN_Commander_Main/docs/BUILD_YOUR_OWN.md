@@ -103,7 +103,7 @@ The build stops with an explanation if USB CDC On Boot is off or if two function
    CAN Commander v2.3
    owner=none active_tool=none dbc_signals=0
    can1 backend=disabled state=disabled
-   wifi ap=down autostart=0 ssid=CAN_Commander clients=0 cli_port=7777
+   wifi ap=up autostart=1 ssid=CanCommander clients=0 cli_port=7777
    ```
 3. Connect the CAN wires to the vehicle, turn the ignition on, and listen without transmitting:
    ```text
@@ -149,4 +149,4 @@ With one LED you get the status light only (no RX/TX activity blink). See "Statu
 
 ## Safety
 
-Transmitting on a vehicle bus can set fault codes, light warnings or move actuators. Start in listen mode, test on a bench or a parked vehicle, and stop transmitting tools with `tool stop` when you're done. The Wi-Fi command line is off by default; if you turn it on, set your own password first (`wifi set pass=...`).
+Transmitting on a vehicle bus can set fault codes, light warnings or move actuators. Start in listen mode, test on a bench or a parked vehicle, and stop transmitting tools with `tool stop` when you're done. The `CanCommander` Wi-Fi AP and dashboard start by default with the public password `cancommander`; change it in the dashboard or with `wifi set pass=...`.

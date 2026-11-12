@@ -143,7 +143,7 @@
 #endif
 
 #ifndef BOARDCFG_WIFI_AP_SSID
-#define BOARDCFG_WIFI_AP_SSID "CAN_Commander"
+#define BOARDCFG_WIFI_AP_SSID "CanCommander"
 #endif
 
 #ifndef BOARDCFG_WIFI_AP_PASSWORD
@@ -163,9 +163,8 @@
 #endif
 
 // 1 = AP auto-start enabled by default at first boot (can be overridden and persisted at runtime)
-// Default: 0 (user must run `wifi start` or persist `wifi set autostart=1`)
 #ifndef BOARDCFG_WIFI_AP_AUTOSTART
-#define BOARDCFG_WIFI_AP_AUTOSTART 0
+#define BOARDCFG_WIFI_AP_AUTOSTART 1
 #endif
 
 #define BOARDCFG_FIRMWARE_VERSION_STRING "2.3"
