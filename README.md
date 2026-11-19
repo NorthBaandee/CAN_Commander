@@ -25,7 +25,14 @@ Wi-Fi TCP CLI    --------------> +------------------+ ---> CAN1 (optional): MCP2
 
 - **The firmware does the CAN work**: receiving and filtering frames, decoding signals, transmitting, timing replays and OBD-II requests. It runs one tool at a time.
 - **The Flipper app is the main interface.** It sends commands over the Flipper's GPIO UART, shows live dashboards, and stores profiles on the Flipper's SD card. It also powers the board from the Flipper's 5V pin.
-- **The command line** offers the same tools as text commands over USB, or over a Wi-Fi access point the board can host (off by default). It suits laptops, phones and scripts.
+- **The command line** offers the same tools as text commands over USB, or over the board's Wi-Fi access point and TCP CLI (port `7777`, enabled and autostarted by default). It suits laptops, phones and scripts.
+- **The Linux guided-discovery client is experimental and in progress.** It connects over TCP, captures CAN0 passively, and timestamps user action cues in JSONL so observations can be correlated later.
+
+### Linux guided-discovery status
+
+The first milestone is implemented in [the portable TCP client](CAN_Commander_FlipperZero/can_commander/clients/tcp/README.md): guided passive capture plus timestamped action annotations. It has been built and tested against a mock server, and its TCP connection and read-only CLI command were verified against the ESP32.
+
+Vehicle capture is **waiting for the CAN transceiver hardware to be fitted**. No live vehicle frames have been captured, and AI-assisted discovery, signal interpretation and complete vehicle-profile generation are future work. The HTTP dashboard is deferred; the current client uses the TCP CLI on port `7777`.
 
 ## Features
 
@@ -132,6 +139,7 @@ CAN_Commander_FlipperZero/
     can_commander.c/.h              App core
     libraries/                      UART client for the firmware protocol
     scenes/, views/                 Menus and dashboards
+    clients/tcp/                     Portable Linux/Windows/POSIX TCP client and guided capture
 
 CAN_Commander_Firmware/
   CAN_Commander_Main/               ESP32 firmware (Arduino sketch)
@@ -157,6 +165,8 @@ CAN_Commander_Firmware/
 ## Safety
 
 CAN Commander can transmit on a live vehicle network. Injected or replayed frames can set fault codes, light warnings, or operate real vehicle functions. Start with read-only tools (or the firmware's listen-only mode), test transmissions on a bench or a parked vehicle, and stop transmitting tools when you are done. If you enable the Wi-Fi command line, set your own password first: anyone who joins the access point gets full control, including transmitting.
+
+The experimental guided capture client only starts passive `read_all` on CAN0 and refuses to replace an already-running tool. Perform prompted actions only on a bench or with the vehicle stationary, in Park, and secured with the parking brake.
 
 ## License
 

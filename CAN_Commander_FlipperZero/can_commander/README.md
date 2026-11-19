@@ -681,6 +681,9 @@ list. The same command syntax works as on the USB CLI, including
 injection shortcuts (`inject slot=1`, `inject list`, `inject cancel`)
 once `custom_inject` is active.
 
+For a standalone terminal client that can be built with CMake for Windows
+or POSIX targets, see [clients/tcp](clients/tcp/README.md).
+
 Example session:
 ```
 $ nc 192.168.4.1 7777
